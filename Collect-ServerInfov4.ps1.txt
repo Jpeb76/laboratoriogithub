@@ -1,0 +1,618 @@
+<#
+EDITADO POR DANIEL BELLO
+MODIFICAR SECCION DE PARAMETROS ANTES DE EJECUTAR EL SCRIPT
+22-08-2023: Agregado comando para el UUID de VMWARE y Modificada URL de imagen SONDA
+.Codigo base
+https://github.com/cunninghamp/Collect-ServerInfo/blob/master/Collect-ServerInfo.ps1
+#>
+
+[CmdletBinding()]
+
+Param (
+    [String]$SITE='Datacenter KUDOS
+    Organización:SONDA-SEGURIDAD
+    Centro de datos:VDC-SONDA-SEGURIDAD-SILVER ',
+    [String]$CLIENTE='VIAS CHILE',
+    [String]$TIPO='VIRTUAL',
+    [String]$ROL='LANSWEEPER FRONTEND/ENGINE',
+    [String]$MON='SI'
+)
+
+Begin
+{
+    # Inicia
+    Write-Verbose "Iniciando..."
+    $ComputerName = hostname
+}
+
+Process
+{
+    #---------------------------------------------------------------------
+    # Procesa la Informacion del Servidor
+    #---------------------------------------------------------------------
+      
+    Write-Host "Procesando $ComputerName"
+
+    Write-Verbose "=====> Procesando $ComputerName <====="
+
+    $htmlreport = @()
+    $htmlbody = @()
+    $htmlfile = "$($ComputerName).html"
+    $spacer = "<br />"
+
+    #---------------------------------------------------------------------
+    # Informacion General
+    #---------------------------------------------------------------------
+    
+    Write-Verbose "Informacion General"
+
+    $subhead = "<h3>Informacion General</h3>"
+    $htmlbody += $subhead
+    
+    $htmlbody += "<table>
+			        <colgroup>
+				        <col />
+				        <col />
+				        <col />
+				        <col />
+                        <col />
+			        </colgroup>
+			        <tr>
+				        <th>Ubicacion</th>
+				        <th>Cliente</th>
+				        <th>Tipo</th>
+				        <th>Rol</th>
+                        <th>Monitoreo</th>
+			        </tr>
+			        <tr>
+				        <td>$SITE</td>
+                        <td>$CLIENTE</td>
+				        <td>$TIPO</td>
+				        <td>$ROL</td>
+				        <td>$MON</td>
+			        </tr>
+		        </table>"
+    $htmlbody += $spacer
+    
+    #---------------------------------------------------------------------
+    # Recolecta Informacion del Sistema
+    #---------------------------------------------------------------------
+    
+    Write-Verbose "Recolectando Informacion del Sistema"
+
+    $subhead = "<h3>Informacion del Sistema</h3>"
+    $htmlbody += $subhead
+    
+    try
+    {
+        $vmUUID = Invoke-Expression -Command "wmic path win32_computersystemproduct get uuid | findstr /v UUID"
+        $vmUUID = $vmUUID.Trim()
+        $csinfo = Get-WmiObject Win32_ComputerSystem -ComputerName $ComputerName -ErrorAction STOP |
+            Select-Object Name,Manufacturer,Model,
+                        @{Name='Physical Processors';Expression={$_.NumberOfProcessors}},
+                        @{Name='Logical Processors';Expression={$_.NumberOfLogicalProcessors}},
+                        @{Name='Total Physical Memory (Gb)';Expression={
+                            $tpm = $_.TotalPhysicalMemory/1GB;
+                            "{0:F0}" -f $tpm
+                        }},
+                        @{Name='VM UUID';Expression={$vmUUID}},
+						DnsHostName,Domain
+            
+        $htmlbody += $csinfo | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion del Sistema Operativo
+    #---------------------------------------------------------------------
+    
+    Write-Verbose "Recolectando Informacion del Sistema Operativo"
+
+    $subhead = "<h3>Informacion del Sistema Operativo</h3>"
+    $htmlbody += $subhead
+    
+    try
+    {
+        $osinfo = Get-WmiObject Win32_OperatingSystem -ComputerName $ComputerName -ErrorAction STOP | 
+            Select-Object @{Name='Operating System';Expression={$_.Caption}},
+                        @{Name='Architecture';Expression={$_.OSArchitecture}}, Version,
+                        @{Name='Install Date';Expression={ 
+                            $installdate = [datetime]::ParseExact($_.InstallDate.SubString(0,8),"yyyyMMdd",$null);
+                            $installdate.toString('dd/MM/yyyy')
+                        }},
+                        WindowsDirectory
+
+        $htmlbody += $osinfo | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion sobre el estado Sistema Operativo
+    #---------------------------------------------------------------------
+    
+    Write-Verbose "Recolectando Informacion sobre el estado Sistema Operativo"
+
+    $subhead = "<h3>Informacion sobre el estado Sistema Operativo</h3>"
+    $htmlbody += $subhead
+    
+    try
+    {
+        $osinfostatus = Get-WmiObject SoftwareLicensingProduct | Where-Object {$_.PartialProductKey} |
+                            Select-Object Description, ProductKeyID2, GracePeriodRemaining,
+                            @{L='License Status';E={if ($_.LicenseStatus -eq 1){"Licenced"}else{"Not Licenced"} }} 
+
+        $htmlbody += $osinfostatus | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de la Memoria RAM
+    #---------------------------------------------------------------------
+
+    Write-Verbose "Recolectando Informacion de la Memoria RAM"
+
+    $subhead = "<h3>Informacion de la Memoria RAM</h3>"
+    $htmlbody += $subhead
+
+    try
+    {
+        $memorybanks = @()
+        $physicalmemoryinfo = @(Get-WmiObject Win32_PhysicalMemory -ComputerName $ComputerName -ErrorAction STOP |
+            Select-Object DeviceLocator,Manufacturer,Speed,Capacity)
+
+        foreach ($bank in $physicalmemoryinfo)
+        {
+            $memObject = New-Object PSObject
+            $memObject | Add-Member NoteProperty -Name "Device Locator" -Value $bank.DeviceLocator
+            $memObject | Add-Member NoteProperty -Name "Manufacturer" -Value $(if($bank.Manufacturer){ $bank.Manufacturer } else{ "N.A" })
+            $memObject | Add-Member NoteProperty -Name "Speed" -Value $(if($bank.Speed){ $bank.Speed } else{ "N.A" })
+            $memObject | Add-Member NoteProperty -Name "Capacity (GB)" -Value ("{0:F0}" -f $bank.Capacity/1GB)
+
+            $memorybanks += $memObject
+        }
+
+        $htmlbody += $memorybanks | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de los Discos
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de los Discos</h3>"
+    $htmlbody += $subhead
+
+    Write-Verbose "Recolectando Informacion de los Discos"
+
+    try
+    {
+        $diskinfo = Get-WmiObject Win32_LogicalDisk -ComputerName $ComputerName -ErrorAction STOP | Where-Object {$_.DriveType -eq 3} |
+            Select-Object DeviceID,FileSystem,VolumeName,
+            @{Expression={$_.Size /1Gb -as [int]};Label="Total Size (GB)"},
+            @{Expression={$_.Freespace / 1Gb -as [int]};Label="Free Space (GB)"}
+
+        $htmlbody += $diskinfo | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de los volumenes
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de los volumenes</h3>"
+    $htmlbody += $subhead
+
+    Write-Verbose "Recolectando Informacion de los Volumenes"
+
+    try
+    {
+        $volinfo = Get-WmiObject Win32_Volume -ComputerName $ComputerName -ErrorAction STOP | Where-Object {$_.DriveType -eq 3} |
+            Select-Object Label,Name,DeviceID,SystemVolume,
+            @{Expression={$_.Capacity /1Gb -as [int]};Label="Total Size (GB)"},
+            @{Expression={$_.Freespace / 1Gb -as [int]};Label="Free Space (GB)"}
+
+        $htmlbody += $volinfo | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de los Discos Offline
+    #---------------------------------------------------------------------
+        
+    Write-Verbose "Recolectando Informacion de los Discos Offline"
+
+    try
+    {
+        if(Get-Disk | Where-Object {$_.OperationalStatus -match "Offline"})
+        {
+            $htmlbody += "<h3>Informacion de los Discos Offline</h3>"
+            $htmlbody += Get-Disk | Select-Object Number, FriendlyName, SerialNumber, HealthStatus, OperationalStatus,@{l="Size"; e={$_.Size/1GB}}, PartitionStyle | 
+                        Where-Object {$_.OperationalStatus -match "Offline"} | ConvertTo-Html -Fragment
+            
+        }
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta informacion de los Tarjetas de Red
+    #---------------------------------------------------------------------    
+
+    $subhead = "<h3>Informacion de las Tarjetas de Red</h3>"
+    $htmlbody += $subhead
+
+    Write-Verbose "Recolectando informacion de las Tarjetas de Red"
+
+    try
+    {
+        $nics = @()
+        $nicinfo = @(Get-WmiObject Win32_NetworkAdapter -ComputerName $ComputerName -ErrorAction STOP | Where-Object {$_.PhysicalAdapter} |
+            Select-Object Name,AdapterType,MACAddress,
+            @{Name='ConnectionName';Expression={$_.NetConnectionID}},
+            @{Name='Enabled';Expression={$_.NetEnabled}},
+            @{Name='Speed';Expression={$_.Speed/1000000}})
+
+        $nwinfo = Get-WmiObject Win32_NetworkAdapterConfiguration -ComputerName $ComputerName -ErrorAction STOP |
+            Select-Object Description, DHCPServer,  
+            @{Name='IpAddress';Expression={$_.IpAddress -join '; '}},  
+            @{Name='IpSubnet';Expression={$_.IpSubnet -join '; '}},  
+            @{Name='DefaultIPgateway';Expression={$_.DefaultIPgateway -join '; '}},  
+            @{Name='DNSServerSearchOrder';Expression={$_.DNSServerSearchOrder -join '; '}}
+
+            
+        foreach ($nic in $nicinfo)
+        {
+            $nicObject = New-Object PSObject
+            $nicObject | Add-Member NoteProperty -Name "Connection Name" -Value $nic.connectionname
+            $nicObject | Add-Member NoteProperty -Name "Adapter Name" -Value $nic.Name
+            $nicObject | Add-Member NoteProperty -Name "Type" -Value $nic.AdapterType
+            $nicObject | Add-Member NoteProperty -Name "MAC" -Value $nic.MACAddress
+            $nicObject | Add-Member NoteProperty -Name "Enabled" -Value $nic.Enabled
+            $nicObject | Add-Member NoteProperty -Name "Speed (Mbps)" -Value $nic.Speed
+        
+            $ipaddress = ($nwinfo | Where-Object {$_.Description -eq $nic.Name}).IpAddress
+            $nicObject | Add-Member NoteProperty -Name "IPAddress" -Value ($ipaddress -join ", ")
+            $nicObject | Add-Member NoteProperty -Name "Subnet" -Value (($nwinfo | Where-Object {$_.Description -eq $nic.Name}).IpSubnet -join ", ")
+            $nicObject | Add-Member NoteProperty -Name "Gateway" -Value (($nwinfo | Where-Object {$_.Description -eq $nic.Name}).DefaultIPGateway -join ", ")
+		$nicObject | Add-Member NoteProperty -Name "DNS Servers" -Value (($nwinfo | Where-Object {$_.Description -eq $nic.Name}).DNSServerSearchOrder -join ", ")
+
+            $nics += $nicObject
+        }
+
+        $htmlbody += $nics | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de los Usuarios Locales
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de los Usuarios Locales</h3>"
+    $htmlbody += $subhead
+ 
+    Write-Verbose "Recolectando Informacion de los Usuarios Locales"
+        
+    try
+    {
+        #$usuarios = Get-LocalUser | Select-Object Name, Enabled, Description, PrincipalSource, 
+        #    @{Name="Last Login"; Expression={$_.LastLogon.toString('dd/MM/yyyy hh:mm:ss tt')}} | 
+        #    Sort-Object Enabled -Descending
+            
+        $usuarios = Get-WmiObject -Class Win32_UserAccount -Filter "LocalAccount=True" |
+                    Select-Object Name, Status, Disabled, Description, LocalAccount | 
+                    Sort-Object Name   
+
+        $htmlbody += $usuarios | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de HotFix instalados
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de HotFix instalados</h3>"
+    $htmlbody += $subhead
+ 
+    Write-Verbose "Recolectando Informacion de HotFix instalados"
+        
+    try
+    {
+        $hotfix_info = Get-HotFix | Select-Object Description, HotFixID, InstalledBy, 
+            @{Name="InstalledOn"; Expression={$_.InstalledOn.toString('dd/MM/yyyy hh:mm:ss tt')}}
+        
+        $htmlbody += $hotfix_info | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de Event Viewver
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de Visor de sucesos (Critical)</h3>"
+    $htmlbody += $subhead
+ 
+    Write-Verbose "Recolectando Informacion de Event Viewver"
+        
+    try
+    {
+        $eventSystem = Get-WinEvent -FilterHashtable @{Logname='System';Level=1} -ErrorAction SilentlyContinue| Measure-Object | Select-Object count
+        $eventApp = Get-WinEvent -FilterHashtable @{Logname='Application';Level=1} -ErrorAction SilentlyContinue | Measure-Object | Select-Object count
+            
+        $eventObject = New-Object PSObject
+        $eventObject | Add-Member NoteProperty -Name "System Log" -Value $eventSystem.Count
+        $eventObject | Add-Member NoteProperty -Name "Application Log" -Value $eventApp.Count
+                
+        $htmlbody += $eventObject | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de NTP
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de NTP</h3>"
+    $htmlbody += $subhead
+ 
+    Write-Verbose "Recolectando Informacion de NTP"
+        
+    try
+    {
+        $ntp_info = w32tm /query /status
+        $ntpObject = New-Object PSObject
+        $ntpObject | Add-Member NoteProperty -Name "Leap Indicator" -Value $ntp_info.Get(0).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "Stratum" -Value $ntp_info.Get(1).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "Precision" -Value $ntp_info.Get(2).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "Root Delay" -Value $ntp_info.Get(3).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "Root Dispersion" -Value $ntp_info.Get(4).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "ReferenceId" -Value $ntp_info.Get(5).substring(13)
+        $ntpObject | Add-Member NoteProperty -Name "Last Successful Sync Time" -Value $ntp_info.Get(6).substring(27)
+        $ntpObject | Add-Member NoteProperty -Name "Source" -Value $ntp_info.Get(7).split(":")[1]
+        $ntpObject | Add-Member NoteProperty -Name "Poll Interval" -Value $ntp_info.Get(8).split(":")[1]
+                    
+        $htmlbody += $ntpObject | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error NTP No Configurado. </p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    #  Obtener datos de software y servicios
+    #---------------------------------------------------------------------	
+
+    Write-Verbose "Obtener datos de software y servicios"
+        
+    try
+    {
+        $Paths = @("HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*")
+
+        $list = foreach($Path in $Paths) 
+        {
+            Get-ItemProperty $Path | Select-Object Publisher, DisplayName, DisplayVersion
+        }
+
+        $software_list = @()
+
+        foreach ($software in $list)
+        {
+            $softwareObject = New-Object PSObject
+            if($software.DisplayName)
+            {
+                if($software_list.DisplayName -notcontains $software.DisplayName)
+                {
+                    $softwareObject | Add-Member NoteProperty -Name "DisplayName" -Value  $software.DisplayName
+                    $softwareObject | Add-Member NoteProperty -Name "DisplayVersion" -Value $software.DisplayVersion
+                    $softwareObject | Add-Member NoteProperty -Name "Publisher" -Value $software.Publisher
+                    $software_list += $softwareObject
+                }
+            }
+        }
+
+        $services_list = Get-Service | Select-Object Name,DisplayName,Status,StartType
+            
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+    }         
+        
+    #---------------------------------------------------------------------
+    #  Recolecta Informacion de Antivirus, Agente SW y VMtools.
+    #---------------------------------------------------------------------		
+		
+    $subhead = "<h3>Informacion de Antivirus, Agente SW y VMtools.</h3>"
+    $htmlbody += $subhead
+		
+	Write-Verbose "Recolectando Informacion de Antivirus, Agente SW y VMtools."
+
+	try
+	{
+        $subhead = "<h3>Software</h3>"
+        $htmlbody += $subhead
+
+        $crit_soft = $software_list | Where-Object -FilterScript {$_.DisplayName -match "Solarwinds" -or $_.DisplayName -match "VMware Tools" -or $_.DisplayName -match "McAfee" -or $_.DisplayName -match "Trellix"} |
+            Sort-Object DisplayName
+
+        $htmlbody += $crit_soft | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+
+        $subhead = "<h3>Services</h3>"
+        $htmlbody += $subhead
+
+        $crit_serv = $services_list | Where-Object -FilterScript {$_.DisplayName -match "Solarwinds" -or $_.DisplayName -match "VMware" -or $_.DisplayName -match "McAfee" -or $_.DisplayName -match "Trellix"} | 
+            Sort-Object Name
+
+        $htmlbody += $crit_serv | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Recolecta Informacion de los Software Instalados
+    #---------------------------------------------------------------------
+
+    $subhead = "<h3>Informacion de los Software Instalados</h3>"
+    $htmlbody += $subhead
+ 
+    Write-Verbose "Recolectando Informacion de los Software Instalados"
+        
+    try
+    {                       
+        $htmlbody += $software_list | Sort-Object DisplayName | ConvertTo-Html -Fragment
+        $htmlbody += $spacer
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    #  Recolecta Informacion de los Servicios
+    #---------------------------------------------------------------------		
+		
+    $subhead = "<h3>Informacion de los Servicios</h3>"
+    $htmlbody += $subhead
+		
+	Write-Verbose "Recolectando Informacion de los Servicios"
+
+	try
+	{
+        $htmlbody += $services_list | Sort-Object Name | ConvertTo-Html -Fragment
+        $htmlbody += $spacer 
+    }
+    catch
+    {
+        Write-Warning $_.Exception.Message
+        $htmlbody += "<p>Se ha encontrado un error. $($_.Exception.Message)</p>"
+        $htmlbody += $spacer
+    }
+
+    #---------------------------------------------------------------------
+    # Generar reporte HTML
+    #---------------------------------------------------------------------
+	
+    Write-Verbose "Generando reporte HTML"
+    
+    $reportime = Get-Date
+    $reportime = $reportime.ToString('dd/MM/yyyy')
+
+    #HTML y estilos css
+	$htmlhead="<html>
+                <title>Ing. Detalle</title>
+				<style>
+				BODY{font-family: Arial; font-size: 8pt;}
+				H1{font-size: 20px;}
+				H2{font-size: 18px;}
+				H3{font-size: 16px;}
+				TABLE{border: 1px solid black; border-collapse: collapse; font-size: 9pt; width: 90%; table-layout: fixed; word-wrap: break-word; }
+				TH{border: 1px solid black; background: #00609c; padding: 5px; color: white;}
+				TD{border: 1px solid black; padding: 5px;}
+                IMG{ width:170px; height: 40px;; alt:logo; align:left; }
+				td.pass{background: #7FFF00;}
+				td.warn{background: #FFE600;}
+				td.fail{background: #FF0000; color: #ffffff;}
+				td.info{background: #85D4FF;}
+				</style>
+				<body>
+                <div align='center';>
+                <table>
+                <tr>
+                    <th><img src='https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQDDO6q0N0Ve5wYiwugjO34A4_TKfDMblcG3GMSvOxIVTmAPw8P1gWV5zZPzYBJbVVxl6I'> </img> </th>
+                    <th><h1 align='center'>Informacion Servidor: $ComputerName</h1> </th>
+                    <th><h1 align='center'>Generado el: $reportime</h1> </th>
+                        
+                </tr>
+                <tr>
+                        
+                </tr>
+                </table>"
+                    
+    $htmltail = "</div>
+                </body>
+			</html>"
+
+    $htmlreport = $htmlhead + $htmlbody + $htmltail
+
+    $htmlreport | Out-File $htmlfile -Encoding Utf8
+    
+
+}
+
+End
+{ Write-Verbose "=====> Finalizado <=====" }
